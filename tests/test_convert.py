@@ -77,3 +77,47 @@ def test_extract_text_pdf_returns_none_for_blank_pdf(tmp_path):
     _make_blank_pdf(pdf_path, page_count=2)
     result = convert.extract_text_pdf(pdf_path)
     assert result is None
+
+
+import pytesseract
+
+
+def _make_one_page_pdf(path: Path) -> None:
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(path)
+    doc.close()
+
+
+def test_ocr_pdf_returns_high_confidence_text(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "scan.pdf"
+    _make_one_page_pdf(pdf_path)
+
+    def fake_image_to_data(image, output_type):
+        return {
+            "text": ["Ola", "mundo", ""],
+            "conf": ["95", "90", "-1"],
+        }
+
+    monkeypatch.setattr(pytesseract, "image_to_data", fake_image_to_data)
+
+    text, confidence = convert.ocr_pdf(pdf_path)
+    assert "Ola" in text
+    assert "mundo" in text
+    assert confidence == 92.5
+
+
+def test_ocr_pdf_returns_low_confidence_for_garbled_scan(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "scan_ruim.pdf"
+    _make_one_page_pdf(pdf_path)
+
+    def fake_image_to_data(image, output_type):
+        return {
+            "text": ["x1z", "##q"],
+            "conf": ["12", "8"],
+        }
+
+    monkeypatch.setattr(pytesseract, "image_to_data", fake_image_to_data)
+
+    _, confidence = convert.ocr_pdf(pdf_path)
+    assert confidence == 10.0

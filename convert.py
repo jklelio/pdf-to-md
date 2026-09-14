@@ -3,9 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import io
+
 import fitz
+import pytesseract
+from PIL import Image
 
 TEXT_CHARS_PER_PAGE_THRESHOLD = 40
+OCR_CONFIDENCE_THRESHOLD = 70.0
 
 
 def cache_paths(pdf_path: Path) -> tuple[Path, Path]:
@@ -47,3 +52,27 @@ def extract_text_pdf(pdf_path: Path) -> str | None:
         return None
 
     return "\n\n".join(pages_text)
+
+
+def ocr_pdf(pdf_path: Path) -> tuple[str, float]:
+    doc = fitz.open(pdf_path)
+    try:
+        page_texts: list[str] = []
+        confidences: list[float] = []
+        for page in doc:
+            pixmap = page.get_pixmap(dpi=200)
+            image = Image.open(io.BytesIO(pixmap.tobytes("png")))
+            data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+
+            words: list[str] = []
+            for word, conf_str in zip(data["text"], data["conf"]):
+                confidence = float(conf_str)
+                if word.strip() and confidence >= 0:
+                    words.append(word)
+                    confidences.append(confidence)
+            page_texts.append(" ".join(words))
+    finally:
+        doc.close()
+
+    average_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+    return "\n\n".join(page_texts), average_confidence
