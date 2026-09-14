@@ -1,7 +1,35 @@
 # PDF → Markdown auto-conversion hook — design spec
 
 Date: 2026-09-13
-Status: Approved by user, ready for implementation plan
+Status: Implemented; see addendum below for a decision-logic refinement
+found during real-world manual testing
+
+## Addendum (2026-09-13): scanned-page detection refinement
+
+Manual testing against a real 68-page scanned timesheet PDF exposed a
+gap in step 2 of the decision logic below: the page's embedded raster
+scan also carried a low-quality invisible OCR text layer (added by
+whatever scanning software created the PDF) with enough character
+volume to pass the `TEXT_CHARS_PER_PAGE_THRESHOLD` check. The document
+was wrongly treated as "real text" and never got a chance to run
+through our own Tesseract OCR.
+
+Fix implemented in `extract_text_pdf()`: before trusting any embedded
+text, check whether the page is dominated by a single image covering
+`>= 90%` of its area (`IMAGE_DOMINANCE_AREA_RATIO`) — the reliable
+signature of a scan, regardless of how much (or how garbled) embedded
+text sits on top of it. If `>= 50%` of a document's pages are
+image-dominant (`SCANNED_PAGE_FRACTION_THRESHOLD`), `extract_text_pdf`
+returns `None` unconditionally, sending the document straight to the
+OCR step. A secondary, lower-value safety net
+(`GARBAGE_CHAR_RATIO_THRESHOLD`) also rejects extracted text with an
+abnormal share of Unicode replacement/control characters, as defense
+in depth for a different failure mode (this did not catch the
+timesheet case — its extracted text had zero replacement characters,
+just semantically meaningless words made of valid letters).
+
+Also: the hook's timeout in `~/.claude/settings.json` was raised from
+120s to 600s after a real 68-page OCR pass took ~3m35s.
 
 ## Problem
 
