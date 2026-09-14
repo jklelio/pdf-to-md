@@ -6,7 +6,7 @@ from pathlib import Path
 import io
 from dataclasses import dataclass
 
-import fitz
+import pymupdf as fitz
 import pytesseract
 from PIL import Image
 
