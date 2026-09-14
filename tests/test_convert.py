@@ -121,3 +121,60 @@ def test_ocr_pdf_returns_low_confidence_for_garbled_scan(tmp_path, monkeypatch):
 
     _, confidence = convert.ocr_pdf(pdf_path)
     assert confidence == 10.0
+
+
+def test_convert_redirects_for_text_pdf(tmp_path):
+    pdf_path = tmp_path / "contrato.pdf"
+    long_paragraph = "Este e um contrato de prestacao de servicos. " * 10
+    _make_text_pdf(pdf_path, [long_paragraph])
+
+    result = convert.convert(pdf_path)
+
+    assert result.outcome == "redirect"
+    assert result.md_path == tmp_path / ".pdf-cache" / "contrato.md"
+    assert result.md_path.exists()
+    assert "contrato" in result.md_path.read_text(encoding="utf-8").lower()
+
+
+def test_convert_reuses_valid_cache_without_reconverting(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "contrato.pdf"
+    long_paragraph = "Este e um contrato de prestacao de servicos. " * 10
+    _make_text_pdf(pdf_path, [long_paragraph])
+
+    first = convert.convert(pdf_path)
+    assert first.outcome == "redirect"
+
+    def fail_if_called(pdf_path):
+        raise AssertionError("extract_text_pdf should not be called on a cache hit")
+
+    monkeypatch.setattr(convert, "extract_text_pdf", fail_if_called)
+
+    second = convert.convert(pdf_path)
+    assert second.outcome == "redirect"
+    assert second.message == "cached conversion reused"
+
+
+def test_convert_allows_through_when_ocr_confidence_low(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "scan_ruim.pdf"
+    _make_blank_pdf(pdf_path, page_count=1)
+
+    monkeypatch.setattr(convert, "ocr_pdf", lambda p: ("lixo", 10.0))
+
+    result = convert.convert(pdf_path)
+
+    assert result.outcome == "allow"
+    assert result.md_path is None
+
+
+def test_record_failure_increments_and_persists(tmp_path):
+    meta_path = tmp_path / ".pdf-cache" / "doc.meta.json"
+    assert convert.record_failure(meta_path) == 1
+    assert convert.record_failure(meta_path) == 2
+    assert convert.load_meta(meta_path)["fail_count"] == 2
+
+
+def test_reset_failure_zeroes_existing_count(tmp_path):
+    meta_path = tmp_path / ".pdf-cache" / "doc.meta.json"
+    convert.record_failure(meta_path)
+    convert.reset_failure(meta_path)
+    assert convert.load_meta(meta_path)["fail_count"] == 0

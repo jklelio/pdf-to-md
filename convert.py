@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import io
+from dataclasses import dataclass
 
 import fitz
 import pytesseract
@@ -76,3 +77,60 @@ def ocr_pdf(pdf_path: Path) -> tuple[str, float]:
 
     average_confidence = sum(confidences) / len(confidences) if confidences else 0.0
     return "\n\n".join(page_texts), average_confidence
+
+
+@dataclass
+class ConversionResult:
+    outcome: str  # "redirect" or "allow"
+    md_path: Path | None
+    message: str
+
+
+def convert(pdf_path: Path) -> ConversionResult:
+    md_path, meta_path = cache_paths(pdf_path)
+    meta = load_meta(meta_path)
+
+    if md_path.exists() and is_cache_valid(pdf_path, meta):
+        return ConversionResult("redirect", md_path, "cached conversion reused")
+
+    text = extract_text_pdf(pdf_path)
+    if text is not None:
+        _write_conversion(pdf_path, md_path, meta_path, text)
+        return ConversionResult("redirect", md_path, "converted from embedded text")
+
+    ocr_text, confidence = ocr_pdf(pdf_path)
+    if confidence >= OCR_CONFIDENCE_THRESHOLD:
+        _write_conversion(pdf_path, md_path, meta_path, ocr_text)
+        return ConversionResult(
+            "redirect", md_path, f"converted via OCR (confidence {confidence:.0f})"
+        )
+
+    reset_failure(meta_path)
+    return ConversionResult(
+        "allow",
+        None,
+        f"OCR confidence too low ({confidence:.0f} < {OCR_CONFIDENCE_THRESHOLD:.0f}); "
+        "reading original PDF",
+    )
+
+
+def _write_conversion(pdf_path: Path, md_path: Path, meta_path: Path, text: str) -> None:
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    md_path.write_text(text, encoding="utf-8")
+    stat = pdf_path.stat()
+    save_meta(meta_path, {"size": stat.st_size, "mtime": stat.st_mtime, "fail_count": 0})
+
+
+def record_failure(meta_path: Path) -> int:
+    meta = load_meta(meta_path)
+    count = meta.get("fail_count", 0) + 1
+    meta["fail_count"] = count
+    save_meta(meta_path, meta)
+    return count
+
+
+def reset_failure(meta_path: Path) -> None:
+    meta = load_meta(meta_path)
+    if meta.get("fail_count"):
+        meta["fail_count"] = 0
+        save_meta(meta_path, meta)
