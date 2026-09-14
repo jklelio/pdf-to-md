@@ -1,11 +1,31 @@
 from __future__ import annotations
 
+import contextlib
+import os
 import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import convert as conv  # noqa: E402
+
+
+@contextlib.contextmanager
+def _suppress_stdout():
+    """Silence anything convert.py's dependencies print to the real stdout
+    file descriptor (not just sys.stdout), so it never corrupts the hook's
+    single-line JSON output contract."""
+    sys.stdout.flush()
+    saved_fd = os.dup(1)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull_fd, 1)
+        yield
+    finally:
+        sys.stdout.flush()
+        os.dup2(saved_fd, 1)
+        os.close(devnull_fd)
+        os.close(saved_fd)
 
 
 def main() -> int:
@@ -28,7 +48,8 @@ def main() -> int:
     _, meta_path = conv.cache_paths(pdf_path)
 
     try:
-        result = conv.convert(pdf_path)
+        with _suppress_stdout():
+            result = conv.convert(pdf_path)
     except Exception as exc:  # noqa: BLE001 - must never crash the hook
         fail_count = conv.record_failure(meta_path)
         if fail_count <= 1:

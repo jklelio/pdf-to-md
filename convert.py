@@ -7,6 +7,7 @@ import io
 from dataclasses import dataclass
 
 import pymupdf as fitz
+import pymupdf4llm
 import pytesseract
 from PIL import Image
 
@@ -42,11 +43,8 @@ def is_cache_valid(pdf_path: Path, meta: dict) -> bool:
 
 
 def _pages_text(pdf_path: Path) -> list[str]:
-    doc = fitz.open(pdf_path)
-    try:
-        return [page.get_text() for page in doc]
-    finally:
-        doc.close()
+    chunks = pymupdf4llm.to_markdown(str(pdf_path), page_chunks=True)
+    return [chunk["text"] for chunk in chunks]
 
 
 def _garbage_ratio(text: str) -> float:

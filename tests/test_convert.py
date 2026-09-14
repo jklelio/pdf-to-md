@@ -50,7 +50,7 @@ def _make_text_pdf(path: Path, paragraphs: list[str]) -> None:
     doc = fitz.open()
     for paragraph in paragraphs:
         page = doc.new_page()
-        page.insert_text((72, 72), paragraph, fontsize=12)
+        page.insert_textbox(fitz.Rect(72, 72, 500, 700), paragraph, fontsize=12)
     doc.save(path)
     doc.close()
 
@@ -120,6 +120,38 @@ def test_extract_text_pdf_rejects_full_page_scanned_image_even_with_lots_of_over
     result = convert.extract_text_pdf(pdf_path)
 
     assert result is None
+
+
+def _make_table_pdf(path: Path) -> None:
+    doc = fitz.open()
+    page = doc.new_page()
+    rows = [
+        ["Cargo", "Salario"],
+        ["Copeira", "2127,31"],
+        ["Eletricista", "2840,00"],
+    ]
+    col_x = [72, 220, 360]
+    row_y = [100, 130, 160, 190]
+    for x in col_x:
+        page.draw_line((x, row_y[0]), (x, row_y[-1]))
+    for y in row_y:
+        page.draw_line((col_x[0], y), (col_x[-1], y))
+    for r, row in enumerate(rows):
+        for c, value in enumerate(row):
+            page.insert_text((col_x[c] + 5, row_y[r] + 20), value, fontsize=10)
+    doc.save(path)
+    doc.close()
+
+
+def test_extract_text_pdf_formats_detected_tables_as_markdown(tmp_path):
+    pdf_path = tmp_path / "tabela.pdf"
+    _make_table_pdf(pdf_path)
+
+    result = convert.extract_text_pdf(pdf_path)
+
+    assert result is not None
+    assert "|" in result
+    assert "Copeira" in result
 
 
 import pytesseract

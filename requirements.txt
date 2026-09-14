@@ -1,4 +1,5 @@
 pymupdf
+pymupdf4llm
 pytesseract
 Pillow
 pytest
