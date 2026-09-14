@@ -41,3 +41,39 @@ def test_is_cache_valid_false_when_size_differs(tmp_path):
     stat = pdf_path.stat()
     meta = {"size": stat.st_size + 1, "mtime": stat.st_mtime}
     assert convert.is_cache_valid(pdf_path, meta) is False
+
+
+import fitz
+
+
+def _make_text_pdf(path: Path, paragraphs: list[str]) -> None:
+    doc = fitz.open()
+    for paragraph in paragraphs:
+        page = doc.new_page()
+        page.insert_text((72, 72), paragraph, fontsize=12)
+    doc.save(path)
+    doc.close()
+
+
+def _make_blank_pdf(path: Path, page_count: int) -> None:
+    doc = fitz.open()
+    for _ in range(page_count):
+        doc.new_page()
+    doc.save(path)
+    doc.close()
+
+
+def test_extract_text_pdf_returns_text_for_real_text_pdf(tmp_path):
+    pdf_path = tmp_path / "contrato.pdf"
+    long_paragraph = "Este e um contrato de prestacao de servicos. " * 10
+    _make_text_pdf(pdf_path, [long_paragraph, long_paragraph])
+    result = convert.extract_text_pdf(pdf_path)
+    assert result is not None
+    assert "contrato" in result.lower()
+
+
+def test_extract_text_pdf_returns_none_for_blank_pdf(tmp_path):
+    pdf_path = tmp_path / "escaneado.pdf"
+    _make_blank_pdf(pdf_path, page_count=2)
+    result = convert.extract_text_pdf(pdf_path)
+    assert result is None
