@@ -9,12 +9,11 @@ HOOK_PATH = Path(__file__).parent.parent / "hook.py"
 def run_hook(payload: dict) -> dict:
     result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
-        input=json.dumps(payload),
+        input=json.dumps(payload).encode("utf-8"),
         capture_output=True,
-        text=True,
         check=True,
     )
-    return json.loads(result.stdout)
+    return json.loads(result.stdout.decode("utf-8"))
 
 
 def test_hook_ignores_non_read_tools():
@@ -58,3 +57,14 @@ def test_hook_blocks_with_reason_on_first_failure_then_allows_on_second(tmp_path
 
     second = run_hook({"tool_name": "Read", "tool_input": {"file_path": str(missing_pdf)}})
     assert second["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+def test_hook_handles_accented_paths_correctly(tmp_path):
+    accented_dir = tmp_path / "Documentação"
+    accented_dir.mkdir()
+    missing_pdf = accented_dir / "Não_existe.pdf"
+
+    output = run_hook({"tool_name": "Read", "tool_input": {"file_path": str(missing_pdf)}})
+
+    reason = output["hookSpecificOutput"]["permissionDecisionReason"]
+    assert str(missing_pdf) in reason

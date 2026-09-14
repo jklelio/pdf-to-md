@@ -12,6 +12,9 @@ from PIL import Image
 
 TEXT_CHARS_PER_PAGE_THRESHOLD = 40
 OCR_CONFIDENCE_THRESHOLD = 70.0
+GARBAGE_CHAR_RATIO_THRESHOLD = 0.02
+IMAGE_DOMINANCE_AREA_RATIO = 0.9
+SCANNED_PAGE_FRACTION_THRESHOLD = 0.5
 
 
 def cache_paths(pdf_path: Path) -> tuple[Path, Path]:
@@ -38,12 +41,52 @@ def is_cache_valid(pdf_path: Path, meta: dict) -> bool:
     return meta["size"] == stat.st_size and meta["mtime"] == stat.st_mtime
 
 
-def extract_text_pdf(pdf_path: Path) -> str | None:
+def _pages_text(pdf_path: Path) -> list[str]:
     doc = fitz.open(pdf_path)
     try:
-        pages_text = [page.get_text() for page in doc]
+        return [page.get_text() for page in doc]
     finally:
         doc.close()
+
+
+def _garbage_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    garbage_chars = sum(
+        1 for ch in text if ch == "�" or (ord(ch) < 32 and ch not in "\n\r\t")
+    )
+    return garbage_chars / len(text)
+
+
+def _page_is_image_dominant(page) -> bool:
+    page_area = page.rect.width * page.rect.height
+    if page_area <= 0:
+        return False
+    for img in page.get_images(full=True):
+        xref = img[0]
+        for bbox in page.get_image_rects(xref):
+            if (bbox.width * bbox.height) / page_area >= IMAGE_DOMINANCE_AREA_RATIO:
+                return True
+    return False
+
+
+def _is_scanned_document(pdf_path: Path) -> bool:
+    doc = fitz.open(pdf_path)
+    try:
+        page_count = len(doc)
+        if page_count == 0:
+            return False
+        scanned_pages = sum(1 for page in doc if _page_is_image_dominant(page))
+        return (scanned_pages / page_count) >= SCANNED_PAGE_FRACTION_THRESHOLD
+    finally:
+        doc.close()
+
+
+def extract_text_pdf(pdf_path: Path) -> str | None:
+    if _is_scanned_document(pdf_path):
+        return None
+
+    pages_text = _pages_text(pdf_path)
 
     if not pages_text:
         return None
@@ -52,7 +95,11 @@ def extract_text_pdf(pdf_path: Path) -> str | None:
     if avg_chars_per_page <= TEXT_CHARS_PER_PAGE_THRESHOLD:
         return None
 
-    return "\n\n".join(pages_text)
+    combined_text = "\n\n".join(pages_text)
+    if _garbage_ratio(combined_text) > GARBAGE_CHAR_RATIO_THRESHOLD:
+        return None
+
+    return combined_text
 
 
 def ocr_pdf(pdf_path: Path) -> tuple[str, float]:

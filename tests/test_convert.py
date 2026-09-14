@@ -79,6 +79,49 @@ def test_extract_text_pdf_returns_none_for_blank_pdf(tmp_path):
     assert result is None
 
 
+def test_garbage_ratio_is_zero_for_clean_text():
+    assert convert._garbage_ratio("Este e um contrato de prestacao de servicos.") == 0.0
+
+
+def test_garbage_ratio_is_high_for_mostly_replacement_chars():
+    text = "�" * 90 + "ok" * 5
+    assert convert._garbage_ratio(text) > 0.5
+
+
+def test_extract_text_pdf_rejects_high_volume_but_garbled_text(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "folha_de_ponto.pdf"
+    garbled_page = "�" * 60 + " Rerva LxaliBelS ArdavAo Eemen "
+    monkeypatch.setattr(convert, "_is_scanned_document", lambda p: False)
+    monkeypatch.setattr(convert, "_pages_text", lambda p: [garbled_page, garbled_page])
+
+    result = convert.extract_text_pdf(pdf_path)
+
+    assert result is None
+
+
+def _make_scanned_pdf_with_overlay_text(path: Path, overlay_text: str) -> None:
+    doc = fitz.open()
+    page = doc.new_page()
+    pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 100, 100), False)
+    pixmap.set_rect(pixmap.irect, (255, 255, 255))
+    page.insert_image(page.rect, pixmap=pixmap)
+    page.insert_text((72, 72), overlay_text, fontsize=12)
+    doc.save(path)
+    doc.close()
+
+
+def test_extract_text_pdf_rejects_full_page_scanned_image_even_with_lots_of_overlay_text(
+    tmp_path,
+):
+    pdf_path = tmp_path / "scan_com_texto_embutido.pdf"
+    plenty_of_valid_looking_text = "Eru Map WMotgilhagol Ibi Ardav Eemen da Red " * 20
+    _make_scanned_pdf_with_overlay_text(pdf_path, plenty_of_valid_looking_text)
+
+    result = convert.extract_text_pdf(pdf_path)
+
+    assert result is None
+
+
 import pytesseract
 
 
