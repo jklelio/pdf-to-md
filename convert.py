@@ -17,6 +17,13 @@ GARBAGE_CHAR_RATIO_THRESHOLD = 0.02
 IMAGE_DOMINANCE_AREA_RATIO = 0.9
 SCANNED_PAGE_FRACTION_THRESHOLD = 0.5
 
+# Versao do formato do .md em cache. Aumente sempre que o formato mudar.
+#   1 = sem marcadores de pagina (meta sem a chave "version")
+#   2 = marcador `<!-- página N -->` antes de cada pagina; meta com version/kind/pages
+# is_cache_valid() recusa caches cuja versao seja diferente, entao caches no
+# formato antigo sao regenerados na proxima vez que o PDF for solicitado.
+CONVERTER_VERSION = 2
+
 
 def cache_paths(pdf_path: Path) -> tuple[Path, Path]:
     cache_dir = pdf_path.parent / ".pdf-cache"
@@ -38,8 +45,18 @@ def save_meta(meta_path: Path, data: dict) -> None:
 def is_cache_valid(pdf_path: Path, meta: dict) -> bool:
     if "size" not in meta or "mtime" not in meta:
         return False
+    # Cache de versao antiga (sem marcadores de pagina) nao serve: regenerar.
+    if meta.get("version") != CONVERTER_VERSION:
+        return False
     stat = pdf_path.stat()
     return meta["size"] == stat.st_size and meta["mtime"] == stat.st_mtime
+
+
+def _with_page_markers(pages: list[str]) -> str:
+    """Junta o texto das paginas com `<!-- página N -->` (N a partir de 1) antes de cada uma."""
+    return "\n\n".join(
+        f"<!-- página {number} -->\n\n{text}" for number, text in enumerate(pages, start=1)
+    )
 
 
 def _pages_text(pdf_path: Path) -> list[str]:
@@ -93,11 +110,12 @@ def extract_text_pdf(pdf_path: Path) -> str | None:
     if avg_chars_per_page <= TEXT_CHARS_PER_PAGE_THRESHOLD:
         return None
 
+    # Limiares calculados sobre o texto BRUTO das paginas, sem os marcadores.
     combined_text = "\n\n".join(pages_text)
     if _garbage_ratio(combined_text) > GARBAGE_CHAR_RATIO_THRESHOLD:
         return None
 
-    return combined_text
+    return _with_page_markers(pages_text)
 
 
 def ocr_pdf(pdf_path: Path) -> tuple[str, float]:
@@ -121,7 +139,7 @@ def ocr_pdf(pdf_path: Path) -> tuple[str, float]:
         doc.close()
 
     average_confidence = sum(confidences) / len(confidences) if confidences else 0.0
-    return "\n\n".join(page_texts), average_confidence
+    return _with_page_markers(page_texts), average_confidence
 
 
 @dataclass
@@ -129,6 +147,16 @@ class ConversionResult:
     outcome: str  # "redirect" or "allow"
     md_path: Path | None
     message: str
+    kind: str = ""  # "cache", "texto", "ocr" ou "ocr_fraco"
+    confidence: float | None = None  # so para "ocr" e "ocr_fraco"
+
+
+def _page_count(pdf_path: Path) -> int:
+    doc = fitz.open(pdf_path)
+    try:
+        return len(doc)
+    finally:
+        doc.close()
 
 
 def convert(pdf_path: Path) -> ConversionResult:
@@ -136,18 +164,26 @@ def convert(pdf_path: Path) -> ConversionResult:
     meta = load_meta(meta_path)
 
     if md_path.exists() and is_cache_valid(pdf_path, meta):
-        return ConversionResult("redirect", md_path, "cached conversion reused")
+        return ConversionResult(
+            "redirect", md_path, "cached conversion reused", kind=meta.get("kind") or "cache"
+        )
 
     text = extract_text_pdf(pdf_path)
     if text is not None:
-        _write_conversion(pdf_path, md_path, meta_path, text)
-        return ConversionResult("redirect", md_path, "converted from embedded text")
+        _write_conversion(pdf_path, md_path, meta_path, text, "texto")
+        return ConversionResult(
+            "redirect", md_path, "converted from embedded text", kind="texto"
+        )
 
     ocr_text, confidence = ocr_pdf(pdf_path)
     if confidence >= OCR_CONFIDENCE_THRESHOLD:
-        _write_conversion(pdf_path, md_path, meta_path, ocr_text)
+        _write_conversion(pdf_path, md_path, meta_path, ocr_text, "ocr")
         return ConversionResult(
-            "redirect", md_path, f"converted via OCR (confidence {confidence:.0f})"
+            "redirect",
+            md_path,
+            f"converted via OCR (confidence {confidence:.0f})",
+            kind="ocr",
+            confidence=confidence,
         )
 
     reset_failure(meta_path)
@@ -156,14 +192,28 @@ def convert(pdf_path: Path) -> ConversionResult:
         None,
         f"OCR confidence too low ({confidence:.0f} < {OCR_CONFIDENCE_THRESHOLD:.0f}); "
         "reading original PDF",
+        kind="ocr_fraco",
+        confidence=confidence,
     )
 
 
-def _write_conversion(pdf_path: Path, md_path: Path, meta_path: Path, text: str) -> None:
+def _write_conversion(
+    pdf_path: Path, md_path: Path, meta_path: Path, text: str, kind: str
+) -> None:
     md_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.write_text(text, encoding="utf-8")
     stat = pdf_path.stat()
-    save_meta(meta_path, {"size": stat.st_size, "mtime": stat.st_mtime, "fail_count": 0})
+    save_meta(
+        meta_path,
+        {
+            "version": CONVERTER_VERSION,
+            "kind": kind,
+            "pages": _page_count(pdf_path),
+            "size": stat.st_size,
+            "mtime": stat.st_mtime,
+            "fail_count": 0,
+        },
+    )
 
 
 def record_failure(meta_path: Path) -> int:

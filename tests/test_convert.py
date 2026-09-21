@@ -31,7 +31,7 @@ def test_is_cache_valid_true_when_size_and_mtime_match(tmp_path):
     pdf_path = tmp_path / "doc.pdf"
     pdf_path.write_bytes(b"%PDF-1.4 fake")
     stat = pdf_path.stat()
-    meta = {"size": stat.st_size, "mtime": stat.st_mtime}
+    meta = {"size": stat.st_size, "mtime": stat.st_mtime, "version": convert.CONVERTER_VERSION}
     assert convert.is_cache_valid(pdf_path, meta) is True
 
 
@@ -39,7 +39,11 @@ def test_is_cache_valid_false_when_size_differs(tmp_path):
     pdf_path = tmp_path / "doc.pdf"
     pdf_path.write_bytes(b"%PDF-1.4 fake")
     stat = pdf_path.stat()
-    meta = {"size": stat.st_size + 1, "mtime": stat.st_mtime}
+    meta = {
+        "size": stat.st_size + 1,
+        "mtime": stat.st_mtime,
+        "version": convert.CONVERTER_VERSION,
+    }
     assert convert.is_cache_valid(pdf_path, meta) is False
 
 
@@ -253,3 +257,212 @@ def test_reset_failure_zeroes_existing_count(tmp_path):
     convert.record_failure(meta_path)
     convert.reset_failure(meta_path)
     assert convert.load_meta(meta_path)["fail_count"] == 0
+
+
+# --- marcadores de pagina, versao do cache, kind/confidence -------------------
+
+MARKER_1 = "<!-- página 1 -->"
+MARKER_2 = "<!-- página 2 -->"
+MARKER_3 = "<!-- página 3 -->"
+
+
+def test_with_page_markers_puts_marker_before_each_page_1_based():
+    result = convert._with_page_markers(["alfa", "beta", "gama"])
+    assert result == (
+        "<!-- página 1 -->\n\nalfa\n\n"
+        "<!-- página 2 -->\n\nbeta\n\n"
+        "<!-- página 3 -->\n\ngama"
+    )
+
+
+def test_with_page_markers_handles_single_and_empty_pages():
+    assert convert._with_page_markers(["x"]) == "<!-- página 1 -->\n\nx"
+    assert convert._with_page_markers([]) == ""
+    result = convert._with_page_markers(["", "b"])
+    assert result.startswith(MARKER_1 + "\n\n")
+    assert MARKER_2 + "\n\nb" in result
+
+
+def test_extract_text_pdf_adds_page_markers_in_order(tmp_path):
+    pdf_path = tmp_path / "contrato.pdf"
+    _make_text_pdf(
+        pdf_path,
+        [
+            "Primeira pagina do contrato de prestacao de servicos. " * 6,
+            "Segunda pagina do contrato de prestacao de servicos. " * 6,
+            "Terceira pagina do contrato de prestacao de servicos. " * 6,
+        ],
+    )
+
+    result = convert.extract_text_pdf(pdf_path)
+
+    assert result is not None
+    assert result.startswith(MARKER_1 + "\n\n")
+    i1, i2, i3 = (result.index(m) for m in (MARKER_1, MARKER_2, MARKER_3))
+    assert i1 < result.index("Primeira") < i2
+    assert i2 < result.index("Segunda") < i3
+    assert i3 < result.index("Terceira")
+    assert result.count("<!-- página ") == 3
+
+
+def test_text_threshold_uses_raw_pages_not_marker_text(tmp_path, monkeypatch):
+    # 30 chars/page is below the 40 threshold; the markers (19 chars) would
+    # push it above 40 if they were counted.
+    pdf_path = tmp_path / "curto.pdf"
+    short_page = "x" * 30
+    monkeypatch.setattr(convert, "_is_scanned_document", lambda p: False)
+    monkeypatch.setattr(convert, "_pages_text", lambda p: [short_page, short_page])
+
+    assert convert.extract_text_pdf(pdf_path) is None
+
+
+def test_garbage_threshold_uses_raw_pages_not_marker_text(tmp_path, monkeypatch):
+    # raw ratio 10/482 = 0.0207 (> 0.02); diluted by markers it would be < 0.02.
+    pdf_path = tmp_path / "sujo.pdf"
+    page = "a" * 235 + "�" * 5
+    monkeypatch.setattr(convert, "_is_scanned_document", lambda p: False)
+    monkeypatch.setattr(convert, "_pages_text", lambda p: [page, page])
+
+    assert convert.extract_text_pdf(pdf_path) is None
+
+
+def _fake_ocr_pages(monkeypatch, words_by_call, conf):
+    calls = {"n": 0}
+
+    def fake_image_to_data(image, output_type):
+        word = words_by_call[calls["n"]]
+        calls["n"] += 1
+        return {"text": [word], "conf": [conf]}
+
+    monkeypatch.setattr(pytesseract, "image_to_data", fake_image_to_data)
+
+
+def test_ocr_pdf_adds_page_markers_in_order(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "scan.pdf"
+    _make_blank_pdf(pdf_path, page_count=3)
+    _fake_ocr_pages(monkeypatch, ["Alfa", "Beta", "Gama"], "95")
+
+    text, confidence = convert.ocr_pdf(pdf_path)
+
+    assert confidence == 95.0
+    assert text.startswith(MARKER_1 + "\n\n")
+    i1, i2, i3 = (text.index(m) for m in (MARKER_1, MARKER_2, MARKER_3))
+    assert i1 < text.index("Alfa") < i2
+    assert i2 < text.index("Beta") < i3
+    assert i3 < text.index("Gama")
+
+
+def test_is_cache_valid_false_for_old_or_missing_version(tmp_path):
+    pdf_path = tmp_path / "doc.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 fake")
+    stat = pdf_path.stat()
+    base = {"size": stat.st_size, "mtime": stat.st_mtime}
+    assert convert.is_cache_valid(pdf_path, base) is False  # legacy, no version
+    assert convert.is_cache_valid(pdf_path, {**base, "version": 1}) is False
+    assert convert.is_cache_valid(pdf_path, {**base, "version": 2}) is True
+
+
+def test_converter_version_is_2():
+    assert convert.CONVERTER_VERSION == 2
+
+
+def test_convert_text_pdf_kind_texto_and_meta(tmp_path):
+    pdf_path = tmp_path / "contrato.pdf"
+    paragraph = "Este e um contrato de prestacao de servicos. " * 10
+    _make_text_pdf(pdf_path, [paragraph, paragraph])
+
+    result = convert.convert(pdf_path)
+
+    assert result.outcome == "redirect"
+    assert result.message == "converted from embedded text"
+    assert result.kind == "texto"
+    assert result.confidence is None
+    md = result.md_path.read_text(encoding="utf-8")
+    assert md.startswith(MARKER_1 + "\n\n")
+    assert MARKER_2 in md
+    _, meta_path = convert.cache_paths(pdf_path)
+    meta = convert.load_meta(meta_path)
+    assert meta["version"] == convert.CONVERTER_VERSION
+    assert meta["kind"] == "texto"
+    assert meta["pages"] == 2
+    assert meta["fail_count"] == 0
+    assert "size" in meta and "mtime" in meta
+
+
+def test_convert_ocr_success_kind_ocr_confidence_markers_and_meta(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "scan.pdf"
+    _make_blank_pdf(pdf_path, page_count=2)
+    _fake_ocr_pages(monkeypatch, ["Alfa", "Beta"], "90")
+
+    result = convert.convert(pdf_path)
+
+    assert result.outcome == "redirect"
+    assert result.message == "converted via OCR (confidence 90)"
+    assert result.kind == "ocr"
+    assert result.confidence == 90.0
+    md = result.md_path.read_text(encoding="utf-8")
+    assert md.index(MARKER_1) < md.index("Alfa") < md.index(MARKER_2) < md.index("Beta")
+    meta = convert.load_meta(convert.cache_paths(pdf_path)[1])
+    assert meta["version"] == convert.CONVERTER_VERSION
+    assert meta["kind"] == "ocr"
+    assert meta["pages"] == 2
+
+
+def test_convert_ocr_low_confidence_kind_ocr_fraco(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "scan_ruim.pdf"
+    _make_blank_pdf(pdf_path, page_count=1)
+    monkeypatch.setattr(convert, "ocr_pdf", lambda p: ("lixo", 10.0))
+
+    result = convert.convert(pdf_path)
+
+    assert result.outcome == "allow"
+    assert result.md_path is None
+    assert result.kind == "ocr_fraco"
+    assert result.confidence == 10.0
+    assert result.message.startswith("OCR confidence too low (10 < 70)")
+
+
+def test_convert_cache_hit_reports_stored_kind(tmp_path):
+    pdf_path = tmp_path / "contrato.pdf"
+    _make_text_pdf(pdf_path, ["Este e um contrato de prestacao de servicos. " * 10])
+    convert.convert(pdf_path)
+
+    second = convert.convert(pdf_path)
+
+    assert second.outcome == "redirect"
+    assert second.message == "cached conversion reused"
+    assert second.kind == "texto"
+    assert second.confidence is None
+
+
+def test_convert_cache_hit_kind_falls_back_to_cache_when_meta_has_no_kind(tmp_path):
+    pdf_path = tmp_path / "contrato.pdf"
+    _make_text_pdf(pdf_path, ["Este e um contrato de prestacao de servicos. " * 10])
+    convert.convert(pdf_path)
+    _, meta_path = convert.cache_paths(pdf_path)
+    meta = convert.load_meta(meta_path)
+    del meta["kind"]
+    convert.save_meta(meta_path, meta)
+
+    assert convert.convert(pdf_path).kind == "cache"
+
+
+def test_convert_regenerates_cache_written_by_old_converter_version(tmp_path):
+    pdf_path = tmp_path / "contrato.pdf"
+    _make_text_pdf(pdf_path, ["Este e um contrato de prestacao de servicos. " * 10])
+    md_path, meta_path = convert.cache_paths(pdf_path)
+    stat = pdf_path.stat()
+    md_path.parent.mkdir(parents=True)
+    md_path.write_text("conteudo antigo sem marcador", encoding="utf-8")
+    convert.save_meta(
+        meta_path, {"size": stat.st_size, "mtime": stat.st_mtime, "fail_count": 0}
+    )  # v1: no "version" key
+
+    result = convert.convert(pdf_path)
+
+    assert result.message == "converted from embedded text"
+    assert result.kind == "texto"
+    md = md_path.read_text(encoding="utf-8")
+    assert "conteudo antigo" not in md
+    assert MARKER_1 in md
+    assert convert.load_meta(meta_path)["version"] == convert.CONVERTER_VERSION
