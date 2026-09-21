@@ -30,9 +30,15 @@ def _suppress_stdout():
 
 def main() -> int:
     try:
-        raw = sys.stdin.read()
+        # O Claude Code manda o payload como bytes UTF-8, mas no Windows sys.stdin
+        # decodifica com a code page do console (cp1252): "Terceirização" viraria
+        # "TerceirizaÃ§Ã£o". Por isso lemos os bytes crus e decodificamos como UTF-8.
+        # "utf-8-sig" tolera um BOM eventual. Se os bytes nao forem UTF-8 valido, nao
+        # ha como confiar no caminho (com errors="replace" o caminho viraria outro):
+        # trata como payload ilegivel, igual a JSON invalido (sai com 0, sem saida).
+        raw = sys.stdin.buffer.read().decode("utf-8-sig")
         payload = json.loads(raw) if raw.strip() else {}
-    except json.JSONDecodeError:
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return 0
 
     if payload.get("tool_name") != "Read":
@@ -45,6 +51,16 @@ def main() -> int:
         return 0
 
     pdf_path = Path(file_path)
+    if not pdf_path.is_file():
+        # Guarda: caminho inexistente nao e convertido nem gera pastas (record_failure/
+        # _write_conversion fariam mkdir de toda a arvore .pdf-cache). Libera a leitura:
+        # a ferramenta Read mostra o erro real de arquivo nao encontrado.
+        _emit_decision(
+            "allow",
+            f"Arquivo PDF nao encontrado: {file_path}; nada a converter, "
+            "deixando a leitura original seguir.",
+        )
+        return 0
     _, meta_path = conv.cache_paths(pdf_path)
 
     try:
@@ -90,6 +106,8 @@ def _emit_decision(decision: str, reason: str) -> None:
 
 
 def _emit(payload: dict) -> None:
+    # ensure_ascii=True (padrao): a saida e ASCII puro (acentos viram \uXXXX), entao
+    # nenhuma code page do stdout do Windows consegue corromper caminhos acentuados.
     print(json.dumps(payload))
 
 
